@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
-import { Sparkles, Youtube, ArrowRight, Play, FileText, CheckCircle2, AlertCircle, HelpCircle } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Sparkles, Youtube, CheckCircle2, AlertCircle, Play } from 'lucide-react';
+import { extractYouTubeVideoId } from '../utils/youtube';
 
 interface HeroProps {
-  onStartGeneration: (url: string) => void;
+  onStartGeneration: (url: string, videoId: string) => void;
   onOpenManualTranscript: () => void;
   onLoadSample: () => void;
   isLoading: boolean;
@@ -42,30 +43,44 @@ export const Hero: React.FC<HeroProps> = ({
   const [url, setUrl] = useState('');
   const [localError, setLocalError] = useState<string | null>(null);
 
+  // Real-time video ID extraction
+  const detectedVideoId = extractYouTubeVideoId(url);
+  const isValidUrl = Boolean(detectedVideoId);
+
+  // Clear local error when user modifies input
+  useEffect(() => {
+    if (localError) {
+      setLocalError(null);
+    }
+  }, [url]);
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setLocalError(null);
 
     const trimmed = url.trim();
     if (!trimmed) {
-      setLocalError('Please paste a YouTube video link.');
+      setLocalError('Please enter a valid YouTube video URL.');
       return;
     }
 
-    // Basic client check
-    const isYouTube = /(?:youtube\.com\/(?:watch|shorts|embed)|youtu\.be\/)/i.test(trimmed);
-    if (!isYouTube) {
-      setLocalError('Please paste a valid YouTube video link (e.g., https://www.youtube.com/watch?v=...)');
+    const videoId = extractYouTubeVideoId(trimmed);
+    if (!videoId) {
+      setLocalError('Please enter a valid YouTube video URL.');
       return;
     }
 
-    onStartGeneration(trimmed);
+    // URL is valid, start transcript and video processing
+    onStartGeneration(trimmed, videoId);
   };
 
   const handleSelectSample = (sampleUrl: string) => {
     setUrl(sampleUrl);
     setLocalError(null);
-    onStartGeneration(sampleUrl);
+    const videoId = extractYouTubeVideoId(sampleUrl);
+    if (videoId) {
+      onStartGeneration(sampleUrl, videoId);
+    }
   };
 
   return (
@@ -113,12 +128,9 @@ export const Hero: React.FC<HeroProps> = ({
               <input
                 type="text"
                 value={url}
-                onChange={(e) => {
-                  setUrl(e.target.value);
-                  if (localError) setLocalError(null);
-                }}
-                placeholder="Paste YouTube video link here... (e.g. https://www.youtube.com/watch?v=...)"
-                aria-label="YouTube lecture URL"
+                onChange={(e) => setUrl(e.target.value)}
+                placeholder="Paste YouTube video link"
+                aria-label="Paste YouTube video link"
                 className="w-full px-4 py-3.5 text-base text-stone-900 placeholder-stone-400 bg-transparent border-0 focus:outline-none focus:ring-0 font-medium"
                 disabled={isLoading}
               />
@@ -127,12 +139,12 @@ export const Hero: React.FC<HeroProps> = ({
               <button
                 type="submit"
                 disabled={isLoading}
-                className="w-full sm:w-auto mt-2 sm:mt-0 flex items-center justify-center gap-2 px-7 py-3.5 rounded-xl bg-amber-500 hover:bg-amber-400 active:bg-amber-600 text-stone-950 font-bold text-base shadow-md shadow-amber-500/25 transition-all hover:scale-[1.02] active:scale-[0.98] disabled:opacity-60 cursor-pointer whitespace-nowrap"
+                className="w-full sm:w-auto mt-2 sm:mt-0 flex items-center justify-center gap-2 px-7 py-3.5 rounded-xl bg-amber-500 hover:bg-amber-400 active:bg-amber-600 text-stone-950 font-bold text-base shadow-md shadow-amber-500/25 transition-all hover:scale-[1.02] active:scale-[0.98] disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer whitespace-nowrap"
               >
                 {isLoading ? (
                   <>
                     <span className="w-4 h-4 border-2 border-stone-900 border-t-transparent rounded-full animate-spin" />
-                    <span>Processing...</span>
+                    <span>Generating Notes...</span>
                   </>
                 ) : (
                   <>
@@ -143,6 +155,14 @@ export const Hero: React.FC<HeroProps> = ({
               </button>
             </div>
           </form>
+
+          {/* Real-time Validation Success Feedback */}
+          {isValidUrl && !localError && !errorMessage && (
+            <div className="mt-2.5 px-3 py-1.5 rounded-lg bg-emerald-50 border border-emerald-200/80 text-emerald-800 text-xs font-semibold inline-flex items-center gap-1.5 animate-fade-in">
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+              <span>YouTube video detected ✓ (ID: {detectedVideoId})</span>
+            </div>
+          )}
 
           {/* Error Message if any */}
           {(localError || errorMessage) && (
@@ -184,45 +204,6 @@ export const Hero: React.FC<HeroProps> = ({
             <Sparkles className="w-3 h-3 text-amber-700" />
             <span>Interactive Demo Sheet</span>
           </button>
-        </div>
-
-        {/* Animated Workflow Stage Indicator */}
-        <div className="max-w-3xl mx-auto pt-6 border-t border-stone-200/60">
-          <div className="flex flex-col sm:flex-row items-center justify-between gap-3 sm:gap-2">
-            
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-white border border-stone-200 text-xs font-semibold text-stone-800 shadow-2xs">
-              <Youtube className="w-4 h-4 text-red-500" />
-              <span>YouTube Video</span>
-            </div>
-
-            <div className="hidden sm:flex items-center text-amber-500">
-              <ArrowRight className="w-4 h-4 animate-pulse" />
-            </div>
-
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-white border border-stone-200 text-xs font-semibold text-stone-800 shadow-2xs">
-              <Sparkles className="w-4 h-4 text-amber-500" />
-              <span>AI Processing</span>
-            </div>
-
-            <div className="hidden sm:flex items-center text-amber-500">
-              <ArrowRight className="w-4 h-4 animate-pulse" />
-            </div>
-
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-white border border-stone-200 text-xs font-semibold text-stone-800 shadow-2xs">
-              <FileText className="w-4 h-4 text-blue-500" />
-              <span>Smart Notes</span>
-            </div>
-
-            <div className="hidden sm:flex items-center text-amber-500">
-              <ArrowRight className="w-4 h-4 animate-pulse" />
-            </div>
-
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-emerald-50 border border-emerald-300 text-xs font-semibold text-emerald-800 shadow-2xs">
-              <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-              <span>Fast Revision</span>
-            </div>
-
-          </div>
         </div>
 
       </div>

@@ -57,7 +57,7 @@ router.get('/config-status', (req: Request, res: Response) => {
 router.post('/validate-youtube', async (req: Request, res: Response) => {
   const { url } = req.body;
   if (!url) {
-    return res.status(400).json({ valid: false, error: 'Please paste a valid YouTube video link.' });
+    return res.status(400).json({ valid: false, error: 'Please enter a valid YouTube video URL.' });
   }
 
   const result = await getYouTubeMetadata(url);
@@ -89,7 +89,7 @@ router.post('/transcript', async (req: Request, res: Response) => {
   if (!targetId) {
     return res.status(400).json({
       success: false,
-      error: 'Please paste a valid YouTube video link.'
+      error: 'Please enter a valid YouTube video URL.'
     });
   }
 

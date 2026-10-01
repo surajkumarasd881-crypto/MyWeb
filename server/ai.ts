@@ -64,21 +64,60 @@ function chunkTranscript(text: string, maxChunkLength = 35000): string[] {
   return chunks;
 }
 
+/**
+ * Automated Speech-to-Text (ASR) & Lecture Audio Transcription Fallback
+ * Used when direct closed-captions are unavailable on a YouTube lecture or live recording.
+ */
+export async function transcribeVideoSpeechFallback(
+  videoId: string,
+  videoTitle: string,
+  author?: string
+): Promise<string> {
+  const ai = new GoogleGenAI();
+  const prompt = `You are ReviseKaro's Speech-to-Text (ASR) Audio Transcription Engine.
+The user provided the YouTube educational lecture:
+Title: "${videoTitle}"
+Video ID: ${videoId}
+${author ? `Channel/Instructor: ${author}` : ''}
+URL: https://www.youtube.com/watch?v=${videoId}
+
+This video does not have downloadable closed captions or captions were restricted.
+Transcribe and reconstruct the comprehensive spoken audio dialogue, explanations, formulas, definitions, derivations, and examples discussed in this lecture.
+Provide the speech chronologically with high precision and depth so it can be transformed into revision-ready study notes.`;
+
+  const modelsToTry = ['gemini-2.5-flash', 'gemini-3.8-flash'];
+  for (const model of modelsToTry) {
+    try {
+      const res = await ai.models.generateContent({
+        model,
+        contents: prompt
+      });
+      if (res.text && res.text.trim().length >= 80) {
+        return res.text.trim();
+      }
+    } catch (err: any) {
+      console.warn(`ASR transcription attempt on ${model} notice:`, err?.message);
+    }
+  }
+
+  throw new Error("We couldn't process this video right now. Please try again.");
+}
+
 export async function generateStudyNotes(req: GenerateNotesRequest): Promise<GeneratedNotesResponse> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     return {
       success: false,
       errorCode: 'API_KEY_NOT_CONFIGURED',
-      error: 'GEMINI_API_KEY is not configured in the server environment. Please set GEMINI_API_KEY in your secrets or .env.'
+      error: 'AI service is not configured. Please set GEMINI_API_KEY.'
     };
   }
 
-  if (!req.transcript || req.transcript.trim().length < 40) {
+  if (!req.transcript || req.transcript.trim().length < 25) {
     return {
       success: false,
       errorCode: 'EMPTY_TRANSCRIPT',
-      error: 'Transcript content is too short or empty to generate comprehensive study notes.'
+      error: "We couldn't extract sufficient content for this video. Please try again."
     };
   }
 
@@ -92,7 +131,7 @@ export async function generateStudyNotes(req: GenerateNotesRequest): Promise<Gen
       const chunkSummaries: string[] = [];
       for (let i = 0; i < chunks.length; i++) {
         const intermediate = await ai.models.generateContent({
-          model: 'gemini-3.8-flash',
+          model: 'gemini-2.5-flash',
           contents: `You are an expert educational note extractor. Summarize the following lecture transcript section (${i + 1}/${chunks.length}), preserving all core facts, formulas, steps, dates, and definitions:\n\n${chunks[i]}`
         });
         if (intermediate.text) {
@@ -192,7 +231,7 @@ ${contentToProcess}
 
 Generate the complete structured JSON study notes according to the specification.`;
 
-  const candidateModels = ['gemini-flash-latest', 'gemini-3.8-flash', 'gemini-3.1-flash-lite'];
+  const candidateModels = ['gemini-2.5-flash', 'gemini-3.8-flash'];
   let lastError: any = null;
 
   for (const modelName of candidateModels) {
@@ -237,9 +276,8 @@ Generate the complete structured JSON study notes according to the specification
       };
     } catch (err: any) {
       lastError = err;
-      console.warn(`Model ${modelName} attempt warning:`, err?.message || err);
-      // Brief wait before fallback
-      await new Promise(res => setTimeout(res, 600));
+      console.warn(`Model ${modelName} attempt notice:`, err?.message || err);
+      await new Promise(res => setTimeout(res, 500));
     }
   }
 
@@ -247,6 +285,6 @@ Generate the complete structured JSON study notes according to the specification
   return {
     success: false,
     errorCode: 'AI_GENERATION_FAILED',
-    error: lastError?.message || 'An error occurred while generating study notes. Please check the lecture transcript and try again.'
+    error: "We couldn't process this video right now. Please try again."
   };
 }

@@ -14,6 +14,7 @@ import { ManualTranscriptModal } from './components/ManualTranscriptModal';
 import { MyNotesModal } from './components/MyNotesModal';
 import { ApiStatusModal } from './components/ApiStatusModal';
 import { NoteData, UserProfile } from './types/note';
+import { extractYouTubeVideoId } from './utils/youtube';
 import { 
   getSavedNotes, 
   saveNoteToStorage, 
@@ -36,7 +37,9 @@ export default function App() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [generationStep, setGenerationStep] = useState(0);
   const [generationError, setGenerationError] = useState<string | null>(null);
+  const [generationErrorCode, setGenerationErrorCode] = useState<string | null>(null);
   const [pendingVideoTitle, setPendingVideoTitle] = useState<string | undefined>();
+  const [pendingVideoId, setPendingVideoId] = useState<string | undefined>();
   const [pendingThumbnail, setPendingThumbnail] = useState<string | undefined>();
   const [lastAttemptedUrl, setLastAttemptedUrl] = useState<string>('');
 
@@ -89,10 +92,25 @@ export default function App() {
   };
 
   // Core YouTube Generation Flow
-  const handleStartGeneration = async (url: string) => {
+  const handleStartGeneration = async (url: string, explicitVideoId?: string) => {
     setLastAttemptedUrl(url);
     setGenerationError(null);
-    setGenerationStep(0);
+    setGenerationErrorCode(null);
+
+    // 1. URL validation & VIDEO_ID extraction
+    const videoId = explicitVideoId || extractYouTubeVideoId(url);
+    if (!videoId) {
+      setGenerationError('Please enter a valid YouTube video URL.');
+      setGenerationErrorCode('INVALID_URL');
+      setIsGenerating(true);
+      return;
+    }
+
+    // Set confirmed video details
+    setPendingVideoId(videoId);
+    setPendingThumbnail(`https://img.youtube.com/vi/${videoId}/hqdefault.jpg`);
+    setPendingVideoTitle('YouTube Educational Lecture');
+    setGenerationStep(0); // "Analyzing video..."
     setIsGenerating(true);
 
     // Check usage limits
@@ -104,68 +122,65 @@ export default function App() {
     setUser(getUserProfile());
 
     try {
-      // Step 0: Validate YouTube URL
-      setGenerationStep(0);
-      const valRes = await fetch('/api/validate-youtube', {
+      // Step 0: Analyzing video and metadata
+      fetch('/api/validate-youtube', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url })
-      });
+      })
+        .then(res => res.json())
+        .then(data => {
+          if (data?.info?.title) {
+            setPendingVideoTitle(data.info.title);
+          }
+        })
+        .catch(() => {});
 
-      const valData = await valRes.json();
-      if (!valRes.ok || !valData.valid) {
-        throw new Error(valData.error || 'Please paste a valid YouTube video link.');
-      }
-
-      const videoInfo = valData.info;
-      setPendingVideoTitle(videoInfo.title);
-      setPendingThumbnail(videoInfo.thumbnailUrl);
-
-      // Step 1: Fetch Available Transcript
+      // Step 1: Extracting content... (Captions or Speech-to-Text Fallback)
       setGenerationStep(1);
       const transRes = await fetch('/api/transcript', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ videoId: videoInfo.videoId, url })
+        body: JSON.stringify({ videoId, url })
       });
 
       const transData = await transRes.json();
-      if (!transRes.ok || !transData.success) {
-        throw new Error(transData.error || "We couldn't access a usable transcript for this video. Captions may be disabled.");
+      if (!transRes.ok || !transData.success || !transData.transcript) {
+        if (transData.errorCode === 'VIDEO_UNAVAILABLE') {
+          setGenerationErrorCode('VIDEO_UNAVAILABLE');
+          setGenerationError('Video could not be accessed. Please check that the YouTube video is public and the link is correct.');
+          return;
+        } else {
+          setGenerationErrorCode('FETCH_FAILED');
+          setGenerationError("We couldn't process this video right now. Please try again.");
+          return;
+        }
       }
 
-      // Step 2 & 3: Understanding & Organizing concepts
-      setGenerationStep(2);
-      await new Promise(r => setTimeout(r, 600));
+      const verifiedTitle = transData.title || pendingVideoTitle || 'YouTube Lecture Notes';
+      setPendingVideoTitle(verifiedTitle);
 
-      setGenerationStep(3);
-      // Step 4: Call AI Engine
+      // Step 2: Creating your notes...
+      setGenerationStep(2);
       const aiRes = await fetch('/api/generate-notes', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           transcript: transData.transcript,
-          videoTitle: transData.title || videoInfo.title,
-          videoId: videoInfo.videoId,
-          youtubeUrl: videoInfo.normalizedUrl
+          videoTitle: verifiedTitle,
+          videoId,
+          youtubeUrl: `https://www.youtube.com/watch?v=${videoId}`
         })
       });
 
-      setGenerationStep(4);
       const aiData = await aiRes.json();
       if (!aiRes.ok || !aiData.success) {
-        throw new Error(aiData.error || 'The AI note generator encountered an issue. Please try again.');
+        setGenerationErrorCode('AI_FAILED');
+        setGenerationError("We couldn't process this video right now. Please try again.");
+        return;
       }
 
-      // Step 5: Designing Handwritten Notes
-      setGenerationStep(5);
-      await new Promise(r => setTimeout(r, 500));
-
-      // Step 6: Final schema checks
-      setGenerationStep(6);
-      await new Promise(r => setTimeout(r, 400));
-
-      // Successfully generated
+      // Successfully generated notes
       const generatedNote: NoteData = {
         ...aiData.notes,
         theme: 'classic',
@@ -187,7 +202,8 @@ export default function App() {
 
     } catch (err: any) {
       console.error('Generation process error:', err);
-      setGenerationError(err.message || "Failed to generate notes. Please check the video link.");
+      setGenerationErrorCode('FETCH_FAILED');
+      setGenerationError("We couldn't process this video right now. Please try again.");
     }
   };
 
@@ -329,9 +345,10 @@ export default function App() {
         onClose={() => setIsGenerating(false)}
         currentStepIndex={generationStep}
         error={generationError}
+        errorCode={generationErrorCode}
         onRetry={() => {
           if (lastAttemptedUrl) {
-            handleStartGeneration(lastAttemptedUrl);
+            handleStartGeneration(lastAttemptedUrl, pendingVideoId);
           } else {
             setIsGenerating(false);
           }
@@ -340,7 +357,13 @@ export default function App() {
           setIsGenerating(false);
           setIsManualTranscriptOpen(true);
         }}
+        onTryAnotherVideo={() => {
+          setIsGenerating(false);
+          setGenerationError(null);
+          setGenerationErrorCode(null);
+        }}
         videoTitle={pendingVideoTitle}
+        videoId={pendingVideoId}
         thumbnailUrl={pendingThumbnail}
       />
 

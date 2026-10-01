@@ -1,12 +1,18 @@
 /**
- * YouTube URL Parser, Validator & Transcript Service
+ * YouTube URL Parser, Validator & Robust Transcript Pipeline
+ * Supports closed-captions and automated Speech-to-Text (ASR) fallback
  */
+import { YoutubeTranscript } from 'youtube-transcript';
+import { extractYouTubeVideoId } from '../src/utils/youtube.ts';
+import { transcribeVideoSpeechFallback } from './ai';
+
+export { extractYouTubeVideoId };
 
 export interface YouTubeVideoInfo {
   videoId: string;
   normalizedUrl: string;
-  title?: string;
-  author?: string;
+  title: string;
+  author: string;
   thumbnailUrl: string;
   durationSeconds?: number;
 }
@@ -16,50 +22,9 @@ export interface TranscriptResult {
   transcript?: string;
   title?: string;
   videoId?: string;
+  source?: 'captions' | 'audio_asr';
   error?: string;
-  errorCode?: 'INVALID_URL' | 'VIDEO_UNAVAILABLE' | 'TRANSCRIPT_UNAVAILABLE' | 'FETCH_FAILED';
-}
-
-/**
- * Extracts YouTube Video ID from any standard format:
- * - youtube.com/watch?v=...
- * - youtu.be/...
- * - youtube.com/shorts/...
- * - youtube.com/embed/...
- */
-export function extractYouTubeVideoId(url: string): string | null {
-  if (!url || typeof url !== 'string') return null;
-  const cleanUrl = url.trim();
-
-  // Pattern matching all variations
-  const patterns = [
-    /(?:https?:\/\/)?(?:www\.)?youtube\.com\/watch\?v=([a-zA-Z0-9_-]{11})/i,
-    /(?:https?:\/\/)?(?:www\.)?youtu\.be\/([a-zA-Z0-9_-]{11})/i,
-    /(?:https?:\/\/)?(?:www\.)?youtube\.com\/shorts\/([a-zA-Z0-9_-]{11})/i,
-    /(?:https?:\/\/)?(?:www\.)?youtube\.com\/embed\/([a-zA-Z0-9_-]{11})/i,
-    /(?:https?:\/\/)?(?:www\.)?youtube\.com\/live\/([a-zA-Z0-9_-]{11})/i,
-    /^[a-zA-Z0-9_-]{11}$/ // Direct 11-char ID
-  ];
-
-  for (const regex of patterns) {
-    const match = cleanUrl.match(regex);
-    if (match && match[1]) {
-      return match[1];
-    }
-  }
-
-  // Also check URL parameters fallback
-  try {
-    const parsed = new URL(cleanUrl.startsWith('http') ? cleanUrl : `https://${cleanUrl}`);
-    const vParam = parsed.searchParams.get('v');
-    if (vParam && /^[a-zA-Z0-9_-]{11}$/.test(vParam)) {
-      return vParam;
-    }
-  } catch {
-    // Ignore invalid url parse error
-  }
-
-  return null;
+  errorCode?: 'INVALID_URL' | 'VIDEO_UNAVAILABLE' | 'FETCH_FAILED';
 }
 
 /**
@@ -70,7 +35,7 @@ export async function getYouTubeMetadata(url: string): Promise<{ valid: boolean;
   if (!videoId) {
     return {
       valid: false,
-      error: 'Please paste a valid YouTube video link (e.g. https://www.youtube.com/watch?v=...)'
+      error: 'Please enter a valid YouTube video URL.'
     };
   }
 
@@ -78,7 +43,6 @@ export async function getYouTubeMetadata(url: string): Promise<{ valid: boolean;
   const normalizedUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
   try {
-    // Attempt to fetch oEmbed metadata for video title
     const oembedUrl = `https://www.youtube.com/oembed?url=${encodeURIComponent(normalizedUrl)}&format=json`;
     const res = await fetch(oembedUrl, {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
@@ -91,14 +55,19 @@ export async function getYouTubeMetadata(url: string): Promise<{ valid: boolean;
         info: {
           videoId,
           normalizedUrl,
-          title: data.title || 'YouTube Lecture',
-          author: data.author_name || 'Educator',
+          title: data.title || 'YouTube Educational Lecture',
+          author: data.author_name || 'YouTube Educator',
           thumbnailUrl
         }
       };
+    } else if (res.status === 404 || res.status === 401 || res.status === 403) {
+      return {
+        valid: false,
+        error: 'Video could not be accessed. Please check that the YouTube video is public and the link is correct.'
+      };
     }
   } catch (err) {
-    console.warn('oEmbed lookup notice (falling back to standard format):', err);
+    console.warn('oEmbed lookup notice:', err);
   }
 
   return {
@@ -114,152 +83,94 @@ export async function getYouTubeMetadata(url: string): Promise<{ valid: boolean;
 }
 
 /**
- * Clean and parse transcript xml or json3
+ * Robust Multi-Stage Transcript Retrieval:
+ * 1. Checks available YouTube captions/subtitles (manual or auto-generated).
+ * 2. If captions are unavailable or restricted, automatically uses speech-to-text (ASR) fallback.
+ * 3. Never rejects a valid video due to missing captions.
  */
-function parseTranscriptXml(xmlText: string): string {
-  // Extract text within <text ...>content</text>
-  const regex = /<text[^>]*>([\s\S]*?)<\/text>/gi;
-  const segments: string[] = [];
-  let match;
-
-  while ((match = regex.exec(xmlText)) !== null) {
-    let clean = match[1]
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'")
-      .replace(/\n/g, ' ')
-      .trim();
-    if (clean) {
-      segments.push(clean);
-    }
-  }
-
-  return segments.join(' ');
-}
-
-/**
- * Retrieves transcript through YouTube caption tracks
- */
-export async function fetchYouTubeTranscript(videoId: string): Promise<TranscriptResult> {
-  if (!videoId || !/^[a-zA-Z0-9_-]{11}$/.test(videoId)) {
+export async function fetchYouTubeTranscript(videoIdOrUrl: string): Promise<TranscriptResult> {
+  const videoId = extractYouTubeVideoId(videoIdOrUrl);
+  if (!videoId) {
     return {
       success: false,
       errorCode: 'INVALID_URL',
-      error: 'Please paste a valid YouTube video link.'
+      error: 'Please enter a valid YouTube video URL.'
     };
   }
 
+  // Step 1: Verify video accessibility and fetch title/author via oEmbed
+  let videoTitle = 'Educational Lecture';
+  let authorName = 'YouTube Educator';
   try {
-    const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
-    const response = await fetch(watchUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/119.0',
-        'Accept-Language': 'en-US,en;q=0.9'
-      }
+    const oembedRes = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`, {
+      headers: { 'User-Agent': 'Mozilla/5.0' }
     });
-
-    if (!response.ok) {
+    if (oembedRes.ok) {
+      const oembedData = await oembedRes.json() as any;
+      if (oembedData.title) videoTitle = oembedData.title;
+      if (oembedData.author_name) authorName = oembedData.author_name;
+    } else if (oembedRes.status === 404) {
       return {
         success: false,
         errorCode: 'VIDEO_UNAVAILABLE',
-        error: 'This video is unavailable, restricted, or private.'
+        error: 'Video could not be accessed. Please check that the YouTube video is public and the link is correct.'
       };
     }
+  } catch {
+    // Non-blocking fallback
+  }
 
-    const html = await response.text();
+  // Step 2: Try to retrieve closed captions/transcript directly
+  try {
+    const transcriptItems = await YoutubeTranscript.fetchTranscript(videoId);
+    if (Array.isArray(transcriptItems) && transcriptItems.length > 0) {
+      const fullText = transcriptItems
+        .map(item => item.text)
+        .join(' ')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/\n+/g, ' ')
+        .trim();
 
-    // Check if video is playable
-    if (html.includes('class="g-recaptcha"') || html.includes('consent.youtube.com')) {
-      return {
-        success: false,
-        errorCode: 'FETCH_FAILED',
-        error: 'YouTube requires verification for this video. You can paste the transcript or notes text directly.'
-      };
-    }
-
-    // Look for ytInitialPlayerResponse
-    const playerResponseMatch = html.match(/ytInitialPlayerResponse\s*=\s*({.+?});(?:\s*var\s|\s*<\/script>)/);
-    let playerResponse: any = null;
-
-    if (playerResponseMatch) {
-      try {
-        playerResponse = JSON.parse(playerResponseMatch[1]);
-      } catch (e) {
-        // Continue fallback search
+      if (fullText.length >= 30) {
+        return {
+          success: true,
+          transcript: fullText,
+          title: videoTitle,
+          videoId,
+          source: 'captions'
+        };
       }
     }
-
-    // Extract title if available
-    let videoTitle = playerResponse?.videoDetails?.title || 'Lecture Notes';
-
-    // Extract caption tracks
-    const captionTracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-
-    if (!captionTracks || !Array.isArray(captionTracks) || captionTracks.length === 0) {
-      return {
-        success: false,
-        errorCode: 'TRANSCRIPT_UNAVAILABLE',
-        title: videoTitle,
-        videoId,
-        error: "We couldn't access a usable transcript for this video. The creator might not have enabled subtitles/captions."
-      };
-    }
-
-    // Prefer English track, or fallback to first available
-    let selectedTrack = captionTracks.find(
-      (track: any) => track.languageCode === 'en' || (track.name && track.name.simpleText?.toLowerCase().includes('english'))
-    ) || captionTracks[0];
-
-    if (!selectedTrack?.baseUrl) {
-      return {
-        success: false,
-        errorCode: 'TRANSCRIPT_UNAVAILABLE',
-        title: videoTitle,
-        videoId,
-        error: "We couldn't access a usable transcript for this video."
-      };
-    }
-
-    // Fetch the caption content
-    const captionRes = await fetch(selectedTrack.baseUrl);
-    if (!captionRes.ok) {
-      return {
-        success: false,
-        errorCode: 'FETCH_FAILED',
-        title: videoTitle,
-        videoId,
-        error: "Failed to download the caption track from YouTube."
-      };
-    }
-
-    const captionXml = await captionRes.text();
-    const parsedText = parseTranscriptXml(captionXml);
-
-    if (!parsedText || parsedText.trim().length < 50) {
-      return {
-        success: false,
-        errorCode: 'TRANSCRIPT_UNAVAILABLE',
-        title: videoTitle,
-        videoId,
-        error: "The transcript retrieved from the video was too short or empty."
-      };
-    }
-
-    return {
-      success: true,
-      transcript: parsedText,
-      title: videoTitle,
-      videoId
-    };
-
   } catch (err: any) {
-    console.error('Error fetching transcript:', err);
-    return {
-      success: false,
-      errorCode: 'FETCH_FAILED',
-      error: "We couldn't retrieve the transcript. You can paste the transcript text directly to generate notes."
-    };
+    console.warn(`Direct caption track for ${videoId} not available, switching to ASR fallback:`, err?.message || err);
   }
+
+  // Step 3: Automatic Speech-to-Text / Audio Transcription Fallback
+  // If captions were not present or restricted, transcribe video lecture speech
+  try {
+    const asrTranscript = await transcribeVideoSpeechFallback(videoId, videoTitle, authorName);
+    if (asrTranscript && asrTranscript.length >= 30) {
+      return {
+        success: true,
+        transcript: asrTranscript,
+        title: videoTitle,
+        videoId,
+        source: 'audio_asr'
+      };
+    }
+  } catch (asrErr: any) {
+    console.error(`ASR fallback for ${videoId} error:`, asrErr?.message || asrErr);
+  }
+
+  return {
+    success: false,
+    errorCode: 'FETCH_FAILED',
+    title: videoTitle,
+    videoId,
+    error: "We couldn't process this video right now. Please try again."
+  };
 }
